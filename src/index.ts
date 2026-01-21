@@ -1,7 +1,7 @@
 /**
- * chain-monitor
+ * evm-chain-monitor
  *
- * 区块链事件监控库，支持双模式：
+ * 轻量级 EVM 区块链事件监控库，支持双模式：
  * - racing: 竞速型，追求极致速度
  * - sequential: 业务型，保证事件顺序
  */
@@ -13,14 +13,30 @@ export { ChainMonitor } from './ChainMonitor.js'
 export { MemoryStateStorage } from './MemoryStateStorage.js'
 export { ConsoleLogger } from './ConsoleLogger.js'
 
+// 辅助函数
+export {
+  eventTopic,
+  eventTopics,
+  createLogSelector,
+  createParsedEvent,
+} from './helpers.js'
+
 // 类型
 export type {
+  // 模式和基础类型
   MonitorMode,
   BlockRange,
   LogSelector,
   LogProcessor,
+
+  // 简化 API
+  SimpleMonitorConfig,
+  ParsedEvent,
+  EventHandler,
+
+  // 完整 API
+  ChainMonitorConfig,
   TransactionWrapper,
   StateStorage,
   Logger,
-  ChainMonitorConfig,
 } from './types.js'

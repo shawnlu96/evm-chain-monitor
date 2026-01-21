@@ -1,6 +1,6 @@
 {
   "name": "evm-chain-monitor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Lightweight blockchain event monitoring with dual-mode support (racing/sequential)",
   "type": "module",
   "main": "./build/index.js",

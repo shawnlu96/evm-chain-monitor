@@ -12,11 +12,12 @@ A lightweight, dual-mode blockchain event monitoring library for EVM-compatible 
 ## Features
 
 - **Dual Mode Support**: Choose between `racing` (speed-first) and `sequential` (order-guaranteed) modes
+- **Simple API**: Monitor events with just a few lines of code
 - **WebSocket + HTTP**: Dual-channel monitoring with automatic reconnection
 - **Pluggable Storage**: Bring your own state persistence (memory, database, Redis, etc.)
 - **Pluggable Logger**: Use any logging library (console, tslog, winston, pino, etc.)
 - **Transaction Support**: Optional transaction wrapper for atomic operations
-- **Cron-based Polling**: Configurable polling interval with cron expressions
+- **Lazy Loading**: Fetch transaction/block data only when needed
 - **Minimal Dependencies**: Only `cron` as runtime dependency, `ethers` as peer dependency
 
 ## Installation
@@ -25,8 +26,6 @@ A lightweight, dual-mode blockchain event monitoring library for EVM-compatible 
 npm install evm-chain-monitor ethers
 # or
 yarn add evm-chain-monitor ethers
-# or
-pnpm add evm-chain-monitor ethers
 ```
 
 ## Quick Start
@@ -34,31 +33,25 @@ pnpm add evm-chain-monitor ethers
 ```typescript
 import { ChainMonitor } from 'evm-chain-monitor'
 
-const monitor = new ChainMonitor({
-  mode: 'sequential',
+const monitor = ChainMonitor.create({
   rpcUrl: 'https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY',
-  wsUrl: 'wss://eth-mainnet.g.alchemy.com/v2/YOUR_KEY', // optional
   chainId: 1,
-  contractAddresses: ['0x...'],
-  eventTopics: ['0x...'],
+  contracts: ['0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'], // USDC
+  events: ['Transfer(address,address,uint256)'],
 
-  logSelector: async ({ fromBlock, toBlock }, provider) => {
-    return provider.getLogs({
-      address: '0x...',
-      topics: ['0x...'],
-      fromBlock,
-      toBlock,
-    })
-  },
+  onEvent: async (event) => {
+    console.log('Transfer:', event.transactionHash)
 
-  logProcessor: async (log, tx, chainId, blockTimestamp) => {
-    console.log('Processing:', log.transactionHash)
-    // Your business logic here
+    // Lazy load transaction data only when needed
+    const tx = await event.getTransaction()
+    console.log('From:', tx?.from)
   },
 })
 
 await monitor.start()
 ```
+
+That's it! No need to manually create topic hashes or implement log selectors.
 
 ## Modes
 
@@ -66,59 +59,133 @@ await monitor.start()
 
 Best for speed-critical scenarios like sniping bots or liquidity monitoring:
 
-- WebSocket and HTTP process events in parallel
-- First-come-first-served with deduplication
-- No ordering guarantee
-- Uses in-memory cache for deduplication
-
 ```typescript
-const monitor = new ChainMonitor({
+const monitor = ChainMonitor.create({
   mode: 'racing',
   // ...
 })
 ```
 
-### Sequential Mode
+- WebSocket and HTTP process events in parallel
+- First-come-first-served with deduplication
+- No ordering guarantee
+
+### Sequential Mode (Default)
 
 Best for business applications requiring event ordering:
 
-- WebSocket only triggers polling, doesn't process events directly
-- Events processed in strict block order
-- Supports database transactions for atomicity
-- Uses lock mechanism to prevent concurrent execution
-
 ```typescript
-const monitor = new ChainMonitor({
-  mode: 'sequential',
+const monitor = ChainMonitor.create({
+  mode: 'sequential', // default
   // ...
 })
 ```
 
+- Events processed in strict block order
+- Supports database transactions for atomicity
+- Uses lock mechanism to prevent concurrent execution
+
 ## Configuration
+
+### Simple API (Recommended)
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `mode` | `'racing' \| 'sequential'` | required | Monitoring mode |
+| `mode` | `'racing' \| 'sequential'` | `'sequential'` | Monitoring mode |
 | `rpcUrl` | `string` | required | HTTP RPC endpoint |
-| `wsUrl` | `string` | - | WebSocket RPC endpoint (optional) |
-| `chainId` | `number` | required | Chain ID for validation |
-| `contractAddresses` | `string[]` | required | Contracts to monitor |
-| `eventTopics` | `string[]` | required | Event topics to filter |
-| `logSelector` | `LogSelector` | required | Function to fetch logs |
-| `logProcessor` | `LogProcessor` | required | Function to process each log |
-| `stateStorage` | `StateStorage` | `MemoryStateStorage` | State persistence |
-| `logger` | `Logger` | `ConsoleLogger` | Logging implementation |
-| `transactionWrapper` | `TransactionWrapper` | - | Transaction wrapper |
-| `cronExpression` | `string` | `'*/10 * * * * *'` | Polling interval |
+| `wsUrl` | `string` | - | WebSocket endpoint (optional) |
+| `chainId` | `number` | required | Chain ID |
+| `contracts` | `string[]` | required | Contract addresses |
+| `events` | `string[]` | required | Event signatures or topic hashes |
+| `onEvent` | `EventHandler` | required | Event handler |
+| `pollInterval` | `number` | `10` | Polling interval in seconds |
+| `storage` | `StateStorage` | `MemoryStateStorage` | State persistence |
+| `logger` | `Logger` | `ConsoleLogger` | Logger |
+| `transaction` | `TransactionWrapper` | - | DB transaction wrapper |
 | `batchSize` | `number` | `1000` | Max blocks per batch |
-| `runOnInit` | `boolean` | `true` | Run immediately on start |
-| `strictMode` | `boolean` | `false` | Throw on processing errors |
-| `wsReconnectDelay` | `number` | `3000` | WS reconnect delay (ms) |
-| `dedupeExpiry` | `number` | `300000` | Dedup cache expiry (ms) |
+| `strictMode` | `boolean` | `false` | Throw on errors |
 
-## Custom Storage
+### Event Handler
 
-Implement the `StateStorage` interface for database persistence:
+The `onEvent` handler receives a `ParsedEvent` with convenient methods:
+
+```typescript
+interface ParsedEvent {
+  // Properties
+  log: Log                    // Original ethers Log
+  chainId: number
+  blockNumber: number
+  blockTimestamp: number
+  transactionHash: string
+  logIndex: number
+  address: string
+  topics: readonly string[]
+  data: string
+
+  // Methods (lazy loading)
+  getTransaction(): Promise<TransactionResponse | null>
+  getBlock(): Promise<Block | null>
+  decode(iface: Interface, eventName?: string): unknown
+}
+```
+
+### Decoding Events
+
+```typescript
+import { Interface } from 'ethers'
+
+const erc20Abi = ['event Transfer(address indexed from, address indexed to, uint256 value)']
+const iface = new Interface(erc20Abi)
+
+const monitor = ChainMonitor.create({
+  // ...
+  onEvent: async (event) => {
+    const decoded = event.decode(iface)
+    console.log('From:', decoded.from)
+    console.log('To:', decoded.to)
+    console.log('Value:', decoded.value)
+  },
+})
+```
+
+## Advanced Usage
+
+### Custom Log Selector
+
+For advanced filtering (e.g., indexed parameters):
+
+```typescript
+import { ChainMonitor, eventTopic } from 'evm-chain-monitor'
+import { zeroPadValue } from 'ethers'
+
+const monitor = new ChainMonitor({
+  mode: 'sequential',
+  rpcUrl: 'https://...',
+  chainId: 1,
+  contractAddresses: ['0x...'],
+  eventTopics: [eventTopic('Transfer(address,address,uint256)')],
+
+  // Custom selector: only transfers TO a specific address
+  logSelector: async ({ fromBlock, toBlock }, provider) => {
+    return provider.getLogs({
+      address: '0x...',
+      topics: [
+        eventTopic('Transfer(address,address,uint256)'),
+        null, // from: any
+        zeroPadValue('0xMyAddress', 32), // to: specific
+      ],
+      fromBlock,
+      toBlock,
+    })
+  },
+
+  logProcessor: async (log, tx, chainId, blockTimestamp) => {
+    // Process log
+  },
+})
+```
+
+### Database Persistence
 
 ```typescript
 import { StateStorage } from 'evm-chain-monitor'
@@ -148,15 +215,14 @@ class PrismaStateStorage implements StateStorage {
   }
 }
 
-const monitor = new ChainMonitor({
+const monitor = ChainMonitor.create({
   // ...
-  stateStorage: new PrismaStateStorage(prisma),
+  storage: new PrismaStateStorage(prisma),
+  transaction: (fn, opts) => prisma.$transaction(fn, opts),
 })
 ```
 
-## Custom Logger
-
-Implement the `Logger` interface to use your preferred logging library:
+### Custom Logger
 
 ```typescript
 import { Logger } from 'evm-chain-monitor'
@@ -180,37 +246,35 @@ class PinoLogger implements Logger {
 }
 ```
 
-## Transaction Support
-
-For atomic operations in sequential mode:
+## Helper Functions
 
 ```typescript
-import { PrismaClient } from '@prisma/client'
+import { eventTopic, eventTopics } from 'evm-chain-monitor'
 
-const prisma = new PrismaClient()
+// Convert event signature to topic hash
+const topic = eventTopic('Transfer(address,address,uint256)')
+// => '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
 
-const monitor = new ChainMonitor({
-  mode: 'sequential',
-  // ...
-  transactionWrapper: async (fn, options) => {
-    return prisma.$transaction(fn, options)
-  },
-})
+// Batch convert
+const topics = eventTopics([
+  'Transfer(address,address,uint256)',
+  'Approval(address,address,uint256)',
+])
 ```
 
 ## API
 
 ### `ChainMonitor`
 
-#### Methods
+#### Static Methods
+
+- `ChainMonitor.create(config: SimpleMonitorConfig): ChainMonitor` - Create with simple config (recommended)
+
+#### Instance Methods
 
 - `start(): Promise<void>` - Start the monitor
 - `stop(): void` - Stop the monitor
 - `triggerNow(): void` - Manually trigger a scan
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
