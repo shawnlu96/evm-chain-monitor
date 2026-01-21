@@ -27,8 +27,16 @@
     "events",
     "evm"
   ],
-  "author": "shawn",
+  "author": "shawnlu96",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shawnlu96/evm-chain-monitor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shawnlu96/evm-chain-monitor/issues"
+  },
+  "homepage": "https://github.com/shawnlu96/evm-chain-monitor#readme",
   "dependencies": {
     "cron": "^4.3.3"
   },
