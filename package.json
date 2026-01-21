@@ -1,0 +1,48 @@
+{
+  "name": "chain-monitor",
+  "version": "0.1.0",
+  "description": "Blockchain event monitoring library with dual-mode support (racing/sequential)",
+  "type": "module",
+  "main": "./build/index.js",
+  "types": "./build/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./build/index.js",
+      "types": "./build/index.d.ts"
+    }
+  },
+  "files": [
+    "build"
+  ],
+  "scripts": {
+    "build": "tsc && tsc-alias",
+    "build:watch": "tsc -w",
+    "clean": "rm -rf build",
+    "prepublishOnly": "yarn clean && yarn build"
+  },
+  "keywords": [
+    "blockchain",
+    "ethereum",
+    "monitor",
+    "websocket",
+    "events"
+  ],
+  "author": "shawn",
+  "license": "MIT",
+  "dependencies": {
+    "cron": "^4.3.3",
+    "ethers": "^6.14.4",
+    "tslog": "^4.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.12.0",
+    "tsc-alias": "^1.8.15",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=18.12.0"
+  },
+  "volta": {
+    "node": "18.12.1"
+  }
+}
