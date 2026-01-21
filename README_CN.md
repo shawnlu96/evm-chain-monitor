@@ -167,12 +167,23 @@ const monitor = new ChainMonitor({
 })
 ```
 
-### 数据库持久化
+### 数据库持久化与事务
+
+生产环境建议使用数据库持久化同步状态，并使用事务确保原子性。
+
+**事务工作流程：**
+1. 每个区块的所有事件在同一个事务中处理
+2. 处理完成后在同一事务中更新 `syncBlockNumber`
+3. 任一步骤失败，整个事务回滚
+4. 确保不会丢失或重复处理事件
 
 ```typescript
-import { StateStorage } from 'evm-chain-monitor'
+import { ChainMonitor, StateStorage } from 'evm-chain-monitor'
 import { PrismaClient } from '@prisma/client'
 
+const prisma = new PrismaClient()
+
+// 1. 实现支持事务的 StateStorage
 class PrismaStateStorage implements StateStorage {
   constructor(private prisma: PrismaClient) {}
 
@@ -186,7 +197,7 @@ class PrismaStateStorage implements StateStorage {
   async setSyncBlockNumber(
     chainId: number,
     blockNumber: number,
-    tx?: unknown
+    tx?: unknown  // <-- 这里接收事务客户端
   ): Promise<void> {
     const client = (tx as PrismaClient) ?? this.prisma
     await client.monitorStatus.upsert({
@@ -197,11 +208,52 @@ class PrismaStateStorage implements StateStorage {
   }
 }
 
+// 2. 配置监控器启用事务支持
 const monitor = ChainMonitor.create({
-  // ...
+  rpcUrl: 'https://...',
+  chainId: 1,
+  contracts: ['0x...'],
+  events: ['Transfer(address,address,uint256)'],
+
   storage: new PrismaStateStorage(prisma),
+
+  // 使用 Prisma 事务包装
   transaction: (fn, opts) => prisma.$transaction(fn, opts),
+
+  // 第二个参数是事务客户端
+  onEvent: async (event, tx) => {
+    const client = tx as PrismaClient
+
+    // 所有数据库操作使用事务客户端
+    await client.transfer.create({
+      data: {
+        txHash: event.transactionHash,
+        blockNumber: event.blockNumber,
+        timestamp: new Date(event.blockTimestamp * 1000),
+        // ...
+      },
+    })
+
+    // 如果抛出异常，整个区块的事务会回滚
+    // 包括 syncBlockNumber 的更新
+  },
 })
+
+await monitor.start()
+```
+
+**每个区块的事务流程：**
+```
+区块 N 的事件到达
+    ↓
+prisma.$transaction() 开始
+    ↓
+├── 处理事件 1 (onEvent，使用 tx 客户端)
+├── 处理事件 2 (onEvent，使用 tx 客户端)
+├── ...
+└── 更新 syncBlockNumber 为 N (使用 tx 客户端)
+    ↓
+事务提交（或失败时回滚）
 ```
 
 ## 辅助函数

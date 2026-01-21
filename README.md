@@ -185,12 +185,23 @@ const monitor = new ChainMonitor({
 })
 ```
 
-### Database Persistence
+### Database Persistence with Transactions
+
+For production use, you'll want to persist sync state to a database and use transactions to ensure atomicity.
+
+**How transactions work:**
+1. Each block's events are processed in a single transaction
+2. After processing, `syncBlockNumber` is updated within the same transaction
+3. If any step fails, the entire transaction rolls back
+4. This ensures no events are missed or duplicated
 
 ```typescript
-import { StateStorage } from 'evm-chain-monitor'
+import { ChainMonitor, StateStorage } from 'evm-chain-monitor'
 import { PrismaClient } from '@prisma/client'
 
+const prisma = new PrismaClient()
+
+// 1. Implement StateStorage with transaction support
 class PrismaStateStorage implements StateStorage {
   constructor(private prisma: PrismaClient) {}
 
@@ -204,7 +215,7 @@ class PrismaStateStorage implements StateStorage {
   async setSyncBlockNumber(
     chainId: number,
     blockNumber: number,
-    tx?: unknown
+    tx?: unknown  // <-- This receives the transaction client
   ): Promise<void> {
     const client = (tx as PrismaClient) ?? this.prisma
     await client.monitorStatus.upsert({
@@ -215,11 +226,52 @@ class PrismaStateStorage implements StateStorage {
   }
 }
 
+// 2. Configure the monitor with transaction support
 const monitor = ChainMonitor.create({
-  // ...
+  rpcUrl: 'https://...',
+  chainId: 1,
+  contracts: ['0x...'],
+  events: ['Transfer(address,address,uint256)'],
+
   storage: new PrismaStateStorage(prisma),
+
+  // Wrap operations in Prisma transaction
   transaction: (fn, opts) => prisma.$transaction(fn, opts),
+
+  // The second parameter is the transaction client
+  onEvent: async (event, tx) => {
+    const client = tx as PrismaClient
+
+    // All database operations use the transaction client
+    await client.transfer.create({
+      data: {
+        txHash: event.transactionHash,
+        blockNumber: event.blockNumber,
+        timestamp: new Date(event.blockTimestamp * 1000),
+        // ... other fields
+      },
+    })
+
+    // If this throws, the entire block's transaction rolls back
+    // including the syncBlockNumber update
+  },
 })
+
+await monitor.start()
+```
+
+**Transaction flow for each block:**
+```
+Block N events arrive
+    ↓
+prisma.$transaction() starts
+    ↓
+├── Process event 1 (onEvent with tx client)
+├── Process event 2 (onEvent with tx client)
+├── ...
+└── Update syncBlockNumber to N (with tx client)
+    ↓
+Transaction commits (or rolls back on error)
 ```
 
 ### Custom Logger
