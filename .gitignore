@@ -1,0 +1,7 @@
+node_modules/
+build/
+*.log
+*.tgz
+.DS_Store
+.npmrc
+.yarn/install-state.gz

@@ -6,8 +6,14 @@
  * - sequential: 业务型，保证事件顺序
  */
 
+// 核心类
 export { ChainMonitor } from './ChainMonitor.js'
 
+// 默认实现
+export { MemoryStateStorage } from './MemoryStateStorage.js'
+export { ConsoleLogger } from './ConsoleLogger.js'
+
+// 类型
 export type {
   MonitorMode,
   BlockRange,
@@ -15,5 +21,6 @@ export type {
   LogProcessor,
   TransactionWrapper,
   StateStorage,
+  Logger,
   ChainMonitorConfig,
 } from './types.js'

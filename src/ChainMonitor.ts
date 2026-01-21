@@ -1,14 +1,9 @@
-import { ethers, Log, WebSocketProvider } from 'ethers'
+import { JsonRpcProvider, Log, WebSocketProvider } from 'ethers'
 import { CronJob } from 'cron'
 
-import type {
-  ChainMonitorConfig,
-  BlockRange,
-  LogProcessor,
-  LogSelector,
-  StateStorage,
-  TransactionWrapper,
-} from './types.js'
+import type { ChainMonitorConfig, Logger, StateStorage } from './types.js'
+import { MemoryStateStorage } from './MemoryStateStorage.js'
+import { ConsoleLogger } from './ConsoleLogger.js'
 
 /**
  * 简单的内存去重缓存（用于 racing 模式）
@@ -33,7 +28,6 @@ class DedupeCache {
 
   add(key: string): void {
     this.cache.set(key, Date.now() + this.expiry)
-    // 定期清理过期项
     if (this.cache.size > 10000) {
       this.cleanup()
     }
@@ -57,11 +51,11 @@ class DedupeCache {
  * - sequential: 业务型，WS 触发轮询，按区块顺序处理
  */
 export class ChainMonitor {
-  private readonly config: Required<
-    Pick<ChainMonitorConfig, 'mode' | 'chainId' | 'batchSize' | 'strictMode' | 'wsReconnectDelay' | 'cronExpression'>
-  > & ChainMonitorConfig
+  private readonly config: ChainMonitorConfig
+  private readonly logger: Logger
+  private readonly stateStorage: StateStorage
 
-  private httpProvider: ethers.JsonRpcProvider
+  private httpProvider: JsonRpcProvider
   private wsProvider: WebSocketProvider | null = null
   private cronJob: CronJob | null = null
 
@@ -76,25 +70,29 @@ export class ChainMonitor {
   private blockTimestampCache = new Map<number, number>()
   private readonly MAX_TIMESTAMP_CACHE = 1000
 
+  // 默认值
+  private readonly batchSize: number
+  private readonly strictMode: boolean
+  private readonly wsReconnectDelay: number
+  private readonly cronExpression: string
+  private readonly runOnInit: boolean
+
   constructor(config: ChainMonitorConfig) {
+    this.config = config
+
     // 默认值
-    this.config = {
-      ...config,
-      batchSize: config.batchSize ?? 1000,
-      strictMode: config.strictMode ?? false,
-      wsReconnectDelay: config.wsReconnectDelay ?? 3000,
-      cronExpression: config.cronExpression ?? '*/10 * * * * *',
-      runOnInit: config.runOnInit ?? true,
-      dedupeExpiry: config.dedupeExpiry ?? 5 * 60 * 1000,
-    }
+    this.batchSize = config.batchSize ?? 1000
+    this.strictMode = config.strictMode ?? false
+    this.wsReconnectDelay = config.wsReconnectDelay ?? 3000
+    this.cronExpression = config.cronExpression ?? '*/10 * * * * *'
+    this.runOnInit = config.runOnInit ?? true
 
-    // 验证 sequential 模式必须有 stateStorage
-    if (config.mode === 'sequential' && !config.stateStorage) {
-      throw new Error('stateStorage is required for sequential mode')
-    }
+    // 默认实现
+    this.logger = config.logger ?? new ConsoleLogger()
+    this.stateStorage = config.stateStorage ?? new MemoryStateStorage()
 
-    this.httpProvider = new ethers.JsonRpcProvider(config.rpcUrl)
-    this.dedupeCache = new DedupeCache(this.config.dedupeExpiry)
+    this.httpProvider = new JsonRpcProvider(config.rpcUrl)
+    this.dedupeCache = new DedupeCache(config.dedupeExpiry ?? 5 * 60 * 1000)
   }
 
   /**
@@ -105,7 +103,7 @@ export class ChainMonitor {
       throw new Error('Monitor has been stopped, create a new instance to restart')
     }
 
-    console.log(`[ChainMonitor] Starting in ${this.config.mode} mode...`)
+    this.logger.info(`Starting in ${this.config.mode} mode...`)
 
     // 验证连接
     const network = await this.httpProvider.getNetwork()
@@ -116,12 +114,12 @@ export class ChainMonitor {
     }
 
     // 初始化状态（sequential 模式）
-    if (this.config.mode === 'sequential' && this.config.stateStorage) {
-      const syncBlock = await this.config.stateStorage.getSyncBlockNumber(this.config.chainId)
+    if (this.config.mode === 'sequential') {
+      const syncBlock = await this.stateStorage.getSyncBlockNumber(this.config.chainId)
       if (syncBlock === null) {
         const currentBlock = await this.httpProvider.getBlockNumber()
-        await this.config.stateStorage.setSyncBlockNumber(this.config.chainId, currentBlock)
-        console.log(`[ChainMonitor] Initialized syncBlockNumber to ${currentBlock}`)
+        await this.stateStorage.setSyncBlockNumber(this.config.chainId, currentBlock)
+        this.logger.info(`Initialized syncBlockNumber to ${currentBlock}`)
       }
     }
 
@@ -133,7 +131,7 @@ export class ChainMonitor {
       await this.connectWebSocket()
     }
 
-    console.log(`[ChainMonitor] Started successfully`)
+    this.logger.info('Started successfully')
   }
 
   /**
@@ -157,7 +155,7 @@ export class ChainMonitor {
       this.wsProvider = null
     }
 
-    console.log('[ChainMonitor] Stopped')
+    this.logger.info('Stopped')
   }
 
   /**
@@ -165,18 +163,16 @@ export class ChainMonitor {
    */
   triggerNow(): void {
     if (this.config.mode === 'racing') {
-      // racing 模式：直接执行
       this.doRacingScan().catch(err => {
-        console.error('[ChainMonitor] Racing scan error:', err)
+        this.logger.error('Racing scan error:', err)
       })
     } else {
-      // sequential 模式：带锁执行
       if (this.isRunning) {
         this.pendingTrigger = true
         return
       }
       this.runSequentialOnce().catch(err => {
-        console.error('[ChainMonitor] Sequential scan error:', err)
+        this.logger.error('Sequential scan error:', err)
       })
     }
   }
@@ -185,10 +181,10 @@ export class ChainMonitor {
 
   private startCron(): void {
     this.cronJob = CronJob.from({
-      cronTime: this.config.cronExpression,
+      cronTime: this.cronExpression,
       onTick: () => this.triggerNow(),
       start: true,
-      runOnInit: this.config.runOnInit,
+      runOnInit: this.runOnInit,
       timeZone: 'UTC',
     })
   }
@@ -197,10 +193,10 @@ export class ChainMonitor {
     if (this.isStopped || !this.config.wsUrl) return
 
     try {
-      console.log('[ChainMonitor] Connecting WebSocket...')
+      this.logger.info('Connecting WebSocket...')
       this.wsProvider = new WebSocketProvider(this.config.wsUrl)
       await this.wsProvider.ready
-      console.log('[ChainMonitor] WebSocket connected')
+      this.logger.info('WebSocket connected')
 
       // 监听事件
       for (const address of this.config.contractAddresses) {
@@ -215,18 +211,18 @@ export class ChainMonitor {
       }
 
       // 监听断连
-      const ws = (this.wsProvider as any).websocket
+      const ws = (this.wsProvider as unknown as { websocket: WebSocket }).websocket
       if (ws) {
         ws.onclose = () => {
-          console.warn('[ChainMonitor] WebSocket closed')
+          this.logger.warn('WebSocket closed')
           this.scheduleWsReconnect()
         }
-        ws.onerror = (err: any) => {
-          console.error('[ChainMonitor] WebSocket error:', err.message || err)
+        ws.onerror = (err: Event) => {
+          this.logger.error('WebSocket error:', err)
         }
       }
     } catch (error) {
-      console.error('[ChainMonitor] WebSocket connection failed:', error)
+      this.logger.error('WebSocket connection failed:', error)
       this.scheduleWsReconnect()
     }
   }
@@ -235,26 +231,28 @@ export class ChainMonitor {
     if (this.isStopped) return
     if (this.wsReconnectTimer) return
 
-    console.log(`[ChainMonitor] Reconnecting in ${this.config.wsReconnectDelay}ms...`)
+    this.logger.info(`Reconnecting in ${this.wsReconnectDelay}ms...`)
     this.wsReconnectTimer = setTimeout(async () => {
       this.wsReconnectTimer = null
       if (this.wsProvider) {
-        try { this.wsProvider.destroy() } catch { /* ignore */ }
+        try {
+          this.wsProvider.destroy()
+        } catch {
+          /* ignore */
+        }
         this.wsProvider = null
       }
       await this.connectWebSocket()
-    }, this.config.wsReconnectDelay)
+    }, this.wsReconnectDelay)
   }
 
   private handleWebSocketEvent(log: Log): void {
     if (this.config.mode === 'racing') {
-      // racing 模式：直接处理
       this.processLogRacing(log).catch(err => {
-        console.error('[ChainMonitor] Racing process error:', err)
+        this.logger.error('Racing process error:', err)
       })
     } else {
-      // sequential 模式：触发轮询
-      console.log(`[ChainMonitor] WS event received, triggering scan`)
+      this.logger.debug?.(`WS event received at block ${log.blockNumber}, triggering scan`)
       this.triggerNow()
     }
   }
@@ -264,40 +262,33 @@ export class ChainMonitor {
   private async processLogRacing(log: Log): Promise<void> {
     const cacheKey = `${this.config.chainId}:${log.transactionHash}:${log.index}`
 
-    // 去重检查
     if (this.dedupeCache.has(cacheKey)) {
       return
     }
 
-    // 标记为已处理
     this.dedupeCache.add(cacheKey)
 
-    // 获取区块时间戳
     const blockTimestamp = await this.getBlockTimestamp(log.blockNumber)
 
-    // 处理日志
     try {
       await this.config.logProcessor(log, null, this.config.chainId, blockTimestamp)
     } catch (error) {
-      console.error(`[ChainMonitor] Error processing log ${log.transactionHash}:`, error)
+      this.logger.error(`Error processing log ${log.transactionHash}:`, error)
     }
   }
 
   private async doRacingScan(): Promise<void> {
     try {
       const currentBlock = await this.httpProvider.getBlockNumber()
-      const fromBlock = currentBlock - (this.config.batchSize ?? 100)
+      const fromBlock = currentBlock - Math.min(this.batchSize, 100)
 
-      const logs = await this.config.logSelector(
-        { fromBlock, toBlock: currentBlock },
-        this.httpProvider
-      )
+      const logs = await this.config.logSelector({ fromBlock, toBlock: currentBlock }, this.httpProvider)
 
       for (const log of logs) {
         await this.processLogRacing(log)
       }
     } catch (error) {
-      console.error('[ChainMonitor] Racing scan error:', error)
+      this.logger.error('Racing scan error:', error)
     }
   }
 
@@ -316,7 +307,7 @@ export class ChainMonitor {
         this.pendingTrigger = false
         setImmediate(() => {
           this.runSequentialOnce().catch(err => {
-            console.error('[ChainMonitor] Pending run error:', err)
+            this.logger.error('Pending run error:', err)
           })
         })
       }
@@ -324,47 +315,42 @@ export class ChainMonitor {
   }
 
   private async doSequentialScan(): Promise<void> {
-    const storage = this.config.stateStorage!
     const wrapper = this.config.transactionWrapper
 
     try {
       const targetBlock = await this.httpProvider.getBlockNumber()
-      let syncBlock = await storage.getSyncBlockNumber(this.config.chainId)
+      let syncBlock = await this.stateStorage.getSyncBlockNumber(this.config.chainId)
 
       if (syncBlock === null) {
         syncBlock = targetBlock
-        await storage.setSyncBlockNumber(this.config.chainId, syncBlock)
+        await this.stateStorage.setSyncBlockNumber(this.config.chainId, syncBlock)
       }
 
       while (syncBlock < targetBlock) {
         const fromBlock = syncBlock + 1
-        const toBlock = Math.min(syncBlock + this.config.batchSize, targetBlock)
+        const toBlock = Math.min(syncBlock + this.batchSize, targetBlock)
 
-        const logs = await this.config.logSelector(
-          { fromBlock, toBlock },
-          this.httpProvider
-        )
+        const logs = await this.config.logSelector({ fromBlock, toBlock }, this.httpProvider)
 
         if (logs.length > 0) {
-          console.log(`[ChainMonitor] Processing blocks ${fromBlock}-${toBlock}, ${logs.length} events`)
+          this.logger.info(`Processing blocks ${fromBlock}-${toBlock}, ${logs.length} events`)
         }
 
-        // 按区块分组
         const groupedLogs = this.groupLogsByBlock(logs)
 
         for (const [blockNumber, logsInBlock] of groupedLogs) {
           const blockTimestamp = await this.getBlockTimestamp(blockNumber)
 
-          const processBlock = async (tx?: any) => {
+          const processBlock = async (tx?: unknown) => {
             for (const log of logsInBlock) {
               try {
                 await this.config.logProcessor(log, tx, this.config.chainId, blockTimestamp)
               } catch (error) {
-                console.error(`[ChainMonitor] Error processing log:`, error)
-                if (this.config.strictMode) throw error
+                this.logger.error('Error processing log:', error)
+                if (this.strictMode) throw error
               }
             }
-            await storage.setSyncBlockNumber(this.config.chainId, blockNumber, tx)
+            await this.stateStorage.setSyncBlockNumber(this.config.chainId, blockNumber, tx)
           }
 
           if (wrapper) {
@@ -374,15 +360,14 @@ export class ChainMonitor {
           }
         }
 
-        // 更新到 toBlock（处理没有日志的区块）
         if (toBlock > syncBlock) {
-          await storage.setSyncBlockNumber(this.config.chainId, toBlock)
+          await this.stateStorage.setSyncBlockNumber(this.config.chainId, toBlock)
         }
 
         syncBlock = toBlock
       }
     } catch (error) {
-      console.error('[ChainMonitor] Sequential scan error:', error)
+      this.logger.error('Sequential scan error:', error)
       throw error
     }
   }
@@ -390,7 +375,6 @@ export class ChainMonitor {
   private groupLogsByBlock(logs: Log[]): Map<number, Log[]> {
     const grouped = new Map<number, Log[]>()
 
-    // 先排序
     logs.sort((a, b) => {
       if (a.blockNumber !== b.blockNumber) {
         return a.blockNumber - b.blockNumber
@@ -416,7 +400,6 @@ export class ChainMonitor {
 
     this.blockTimestampCache.set(blockNumber, timestamp)
 
-    // 限制缓存大小
     if (this.blockTimestampCache.size > this.MAX_TIMESTAMP_CACHE) {
       const oldest = this.blockTimestampCache.keys().next().value
       if (oldest !== undefined) {
