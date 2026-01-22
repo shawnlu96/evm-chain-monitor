@@ -11,6 +11,7 @@ export { ChainMonitor } from './ChainMonitor.js'
 
 // 默认实现
 export { MemoryStateStorage } from './MemoryStateStorage.js'
+export { PrismaStateStorage, type PrismaClientLike } from './PrismaStateStorage.js'
 export { ConsoleLogger } from './ConsoleLogger.js'
 
 // 辅助函数
