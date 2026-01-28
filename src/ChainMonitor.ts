@@ -256,6 +256,29 @@ export class ChainMonitor {
   }
 
   /**
+   * 设置同步区块号
+   * 可在 start() 之前调用，指定从哪个区块开始扫描
+   *
+   * @example
+   * ```typescript
+   * const monitor = ChainMonitor.create({ ... })
+   * await monitor.setSyncBlockNumber(19000000)
+   * await monitor.start()
+   * ```
+   */
+  async setSyncBlockNumber(blockNumber: number): Promise<void> {
+    await this.stateStorage.setSyncBlockNumber(this.config.chainId, blockNumber)
+    this.logger.info(`Set syncBlockNumber to ${blockNumber}`)
+  }
+
+  /**
+   * 获取当前同步区块号
+   */
+  async getSyncBlockNumber(): Promise<number | null> {
+    return this.stateStorage.getSyncBlockNumber(this.config.chainId)
+  }
+
+  /**
    * 手动触发一次扫描
    */
   triggerNow(): void {
